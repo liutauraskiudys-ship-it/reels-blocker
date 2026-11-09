@@ -10,6 +10,8 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -44,7 +46,8 @@ class ReelsBlockerService : AccessibilityService() {
     private var stickyMessage: String? = null // stays blocked until the reel screen is left
 
     private var lastScanAt = 0L
-    private var lastTrackAt = 0L
+    private var lastStoryCheckAt = 0L
+    private var lastStoryResult = false
     private var lastDebugAt = 0L
     private var suppressUntil = 0L
     private var debugIds = ""
@@ -60,6 +63,28 @@ class ReelsBlockerService : AccessibilityService() {
     private val regions = ArrayList<Region>()
     private val regionViews = ArrayList<View>()
     private var lastApplied: List<Rect> = emptyList()
+
+    // While a reel overlay exists, follow the reel ~60 times a second instead of waiting for
+    // Instagram's (late, throttled) scroll events.
+    private val handler = Handler(Looper.getMainLooper())
+    private var ticking = false
+    private val tick = object : Runnable {
+        override fun run() {
+            if (regions.isEmpty()) {
+                ticking = false
+                return
+            }
+            trackRegions(System.currentTimeMillis())
+            handler.postDelayed(this, 16)
+        }
+    }
+
+    private fun ensureTicking() {
+        if (!ticking && regions.isNotEmpty()) {
+            ticking = true
+            handler.post(tick)
+        }
+    }
 
     // Temporary technical strip at the top of the screen
     private var badge: TextView? = null
@@ -83,12 +108,6 @@ class ReelsBlockerService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
         val isScroll = event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
-
-        // Fast path: keep the single-reel overlays glued to their reels while the feed scrolls.
-        if (isScroll && regions.isNotEmpty() && now - lastTrackAt >= 16) {
-            lastTrackAt = now
-            trackRegions(now)
-        }
 
         if (now < suppressUntil) return
         val minGap = if (isScroll && inAllowedReel) 0L else 120L
@@ -116,10 +135,23 @@ class ReelsBlockerService : AccessibilityService() {
 
         val pagerH = pagers.maxOfOrNull { it.second.height() } ?: 0
         // Full-screen reel viewer: a pager that fills the screen, not one that sits in the feed.
-        val fullScreenViewer = !feedSel &&
+        var fullScreenViewer = !feedSel &&
             pagers.any { it.second.height() >= fullH && it.second.top <= topMax }
         // If the Home tab is selected we are on the home feed, whatever the Reels tab claims.
-        val reelsTab = reelsSel && !feedSel
+        var reelsTab = reelsSel && !feedSel
+
+        // Stories (Instagram calls them "reel" internally) must never be blocked. Checked only
+        // when we are about to block something, and at most every 400 ms.
+        if (reelsTab || fullScreenViewer) {
+            if (now - lastStoryCheckAt > 400) {
+                lastStoryCheckAt = now
+                lastStoryResult = hasStoryIds(root, 0)
+            }
+            if (lastStoryResult) {
+                reelsTab = false
+                fullScreenViewer = false
+            }
+        }
 
         if (tabBarVisible) dmContext = false
         if (chatOpen) dmContext = true
@@ -193,6 +225,16 @@ class ReelsBlockerService : AccessibilityService() {
         return cls.contains("ViewPager") || id.contains("clips")
     }
 
+    private fun hasStoryIds(n: AccessibilityNodeInfo?, depth: Int): Boolean {
+        if (n == null || depth > 40) return false
+        val id = n.viewIdResourceName
+        if (id != null && id.substringAfter(":id/").startsWith("reel_viewer")) return true
+        for (i in 0 until n.childCount) {
+            if (hasStoryIds(n.getChild(i), depth + 1)) return true
+        }
+        return false
+    }
+
     private fun byId(root: AccessibilityNodeInfo, id: String): List<AccessibilityNodeInfo> =
         root.findAccessibilityNodeInfosByViewId("$IG_PACKAGE:id/$id") ?: emptyList()
 
@@ -217,7 +259,7 @@ class ReelsBlockerService : AccessibilityService() {
         val candidates = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
         for (p in primary + descs) {
             val r = p.second
-            if (r.height() >= dp(120) && r.width() >= dp(120)) candidates.add(p)
+            if (r.height() >= dp(40) && r.width() >= dp(120)) candidates.add(p)
         }
         candidates.sortByDescending { it.second.width() * it.second.height() }
         val kept = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
@@ -229,6 +271,7 @@ class ReelsBlockerService : AccessibilityService() {
             regions.clear()
             for (k in kept) regions.add(Region(k.first, k.second, now))
             applyRegions()
+            ensureTicking()
         } else {
             // Nothing found this time: keep what we had for a moment instead of flickering.
             trackRegions(now)
@@ -276,7 +319,10 @@ class ReelsBlockerService : AccessibilityService() {
     }
 
     private fun applyRegions() {
-        val rects = regions.mapNotNull { clamp(it.rect) }
+        // A little extra above and below hides the small lag while the feed scrolls.
+        val rects = regions.mapNotNull { r ->
+            clamp(Rect(r.rect).also { it.inset(0, -dp(24)) })
+        }
         if (rects == lastApplied) return
         lastApplied = rects
 
@@ -538,6 +584,8 @@ class ReelsBlockerService : AccessibilityService() {
     }
 
     private fun removeEverything() {
+        handler.removeCallbacksAndMessages(null)
+        ticking = false
         hideOverlay()
         clearRegions()
         hideBadge()
