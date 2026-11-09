@@ -126,6 +126,7 @@ class ReelsBlockerService : AccessibilityService() {
         val author = byId(root, "clips_author_username").firstOrNull()?.text?.toString()
         val pagers = byId(root, "clips_viewer_view_pager").map { Pair(it, boundsOf(it)) }
         val medias = byId(root, "clips_media_component").map { Pair(it, boundsOf(it)) }
+        val videos = byId(root, "clips_video_container").map { Pair(it, boundsOf(it)) }
         val descs = (root.findAccessibilityNodeInfosByText("Reel by") ?: emptyList())
             .map { Pair(it, boundsOf(it)) }
 
@@ -199,7 +200,7 @@ class ReelsBlockerService : AccessibilityService() {
         } else {
             hideOverlay()
             if (feedSel && tabBarVisible) {
-                updateRegions(pagers, medias, descs, now)
+                updateRegions(pagers, medias, videos, descs, now)
             } else {
                 clearRegions()
             }
@@ -211,7 +212,7 @@ class ReelsBlockerService : AccessibilityService() {
                 val ms = System.currentTimeMillis() - now
                 showBadge(
                     "feed=$feedSel reels=$reelsSel P=${pagers.size} M=${medias.size} " +
-                        "D=${descs.size} R=${regions.size} ${ms}ms\n$debugIds"
+                        "V=${videos.size} D=${descs.size} R=${regions.size} ${ms}ms\n$debugIds"
                 )
             } else {
                 hideBadge()
@@ -252,14 +253,22 @@ class ReelsBlockerService : AccessibilityService() {
     private fun updateRegions(
         pagers: List<Pair<AccessibilityNodeInfo, Rect>>,
         medias: List<Pair<AccessibilityNodeInfo, Rect>>,
+        videos: List<Pair<AccessibilityNodeInfo, Rect>>,
         descs: List<Pair<AccessibilityNodeInfo, Rect>>,
         now: Long
     ) {
-        val primary = if (pagers.isNotEmpty()) pagers else medias
+        // A reel that is playing in the feed shows up under different ids than one that is only
+        // peeking in, so look at all of them. Prefer the tightest source that exists.
+        val primary = when {
+            videos.isNotEmpty() -> videos
+            medias.isNotEmpty() -> medias
+            else -> pagers
+        }
+        val maxH = (resources.displayMetrics.heightPixels * 92) / 100
         val candidates = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
         for (p in primary + descs) {
             val r = p.second
-            if (r.height() >= dp(40) && r.width() >= dp(120)) candidates.add(p)
+            if (r.height() >= dp(40) && r.height() < maxH && r.width() >= dp(120)) candidates.add(p)
         }
         candidates.sortByDescending { it.second.width() * it.second.height() }
         val kept = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
@@ -422,7 +431,7 @@ class ReelsBlockerService : AccessibilityService() {
         val ids = LinkedHashSet<String>()
         val descs = ArrayList<String>()
         walkDebug(root, 0, ids, descs)
-        return "ids=" + ids.take(10).joinToString(",") + "\nd=" + descs.joinToString(" | ")
+        return "ids=" + ids.take(14).joinToString(",") + "\nd=" + descs.joinToString(" | ")
     }
 
     private fun walkDebug(
