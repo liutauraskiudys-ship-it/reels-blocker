@@ -22,6 +22,7 @@ import android.widget.TextView
 private const val IG_PACKAGE = "com.instagram.android"
 private const val MSG_REELS = "Open your feed instead."
 private const val MSG_ONE_REEL = "One reel at a time."
+private const val REGION_GRACE_MS = 350L
 
 /**
  * Watches Instagram only (everything else is ignored right away).
@@ -30,7 +31,6 @@ private const val MSG_ONE_REEL = "One reel at a time."
  * - Full-screen reel opened from a chat -> allowed, one reel; swiping on -> full-screen overlay.
  * - Reels shown inside the home feed -> only that reel is covered (the rest of the feed,
  *   posts and stories stay usable).
- * - Stories are never touched.
  *
  * Instagram does not publish how its screens are built, so detection works by looking at
  * view IDs, labels and sizes. Those can change in Instagram updates; then this file needs a patch.
@@ -45,7 +45,9 @@ class ReelsBlockerService : AccessibilityService() {
 
     private var lastScanAt = 0L
     private var lastTrackAt = 0L
+    private var lastDebugAt = 0L
     private var suppressUntil = 0L
+    private var debugIds = ""
 
     // Full-screen overlay
     private var overlay: View? = null
@@ -53,18 +55,14 @@ class ReelsBlockerService : AccessibilityService() {
     private var focusRequest: AudioFocusRequest? = null
 
     // Overlays that cover single reels inside the home feed
-    private val regionViews = ArrayList<View>()
-    private var regionNodes: List<AccessibilityNodeInfo> = emptyList()
+    private class Region(var node: AccessibilityNodeInfo, var rect: Rect, var seenAt: Long)
 
-    private class Snapshot {
-        val ids = HashSet<String>()
-        var reelsTabSelected = false
-        var feedTabSelected = false
-        var author: String? = null
-        val pagers = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
-        val medias = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
-        val reelDescs = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
-    }
+    private val regions = ArrayList<Region>()
+    private val regionViews = ArrayList<View>()
+    private var lastApplied: List<Rect> = emptyList()
+
+    // Temporary technical strip at the top of the screen
+    private var badge: TextView? = null
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -77,6 +75,7 @@ class ReelsBlockerService : AccessibilityService() {
             ) {
                 hideOverlay()
                 clearRegions()
+                hideBadge()
                 resetState()
             }
             return
@@ -86,35 +85,41 @@ class ReelsBlockerService : AccessibilityService() {
         val isScroll = event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
 
         // Fast path: keep the single-reel overlays glued to their reels while the feed scrolls.
-        if (isScroll && regionNodes.isNotEmpty() && now - lastTrackAt >= 16) {
+        if (isScroll && regions.isNotEmpty() && now - lastTrackAt >= 16) {
             lastTrackAt = now
-            trackRegions()
+            trackRegions(now)
         }
 
         if (now < suppressUntil) return
-        val minGap = if (isScroll && inAllowedReel) 0L else 150L
+        val minGap = if (isScroll && inAllowedReel) 0L else 120L
         if (now - lastScanAt < minGap) return
         lastScanAt = now
 
         val root = rootInActiveWindow ?: return
-        val snap = Snapshot()
-        scan(root, snap, 0)
-        val ids = snap.ids
+
+        // Targeted lookups (one call each) instead of walking the whole screen.
+        val feedTabs = byId(root, "feed_tab")
+        val clipsTabs = byId(root, "clips_tab")
+        val feedSel = feedTabs.any { it.isSelected }
+        val reelsSel = clipsTabs.any { it.isSelected }
+        val tabBarVisible = feedTabs.isNotEmpty() || clipsTabs.isNotEmpty()
+        val chatOpen = byId(root, "row_thread_composer_edittext").isNotEmpty()
+        val author = byId(root, "clips_author_username").firstOrNull()?.text?.toString()
+        val pagers = byId(root, "clips_viewer_view_pager").map { Pair(it, boundsOf(it)) }
+        val medias = byId(root, "clips_media_component").map { Pair(it, boundsOf(it)) }
+        val descs = (root.findAccessibilityNodeInfosByText("Reel by") ?: emptyList())
+            .map { Pair(it, boundsOf(it)) }
 
         val screenH = resources.displayMetrics.heightPixels
         val fullH = (screenH * 85) / 100
         val topMax = screenH / 20
 
-        val tabBarVisible = "feed_tab" in ids || "clips_tab" in ids
-        val chatOpen = "row_thread_composer_edittext" in ids
-        // Instagram calls stories "reel" internally.
-        val storyOpen = ids.any { it.startsWith("reel_viewer") }
-        val pagerH = snap.pagers.maxOfOrNull { it.second.height() } ?: 0
+        val pagerH = pagers.maxOfOrNull { it.second.height() } ?: 0
         // Full-screen reel viewer: a pager that fills the screen, not one that sits in the feed.
-        val fullScreenViewer = !storyOpen && !snap.feedTabSelected &&
-            snap.pagers.any { it.second.height() >= fullH && it.second.top <= topMax }
+        val fullScreenViewer = !feedSel &&
+            pagers.any { it.second.height() >= fullH && it.second.top <= topMax }
         // If the Home tab is selected we are on the home feed, whatever the Reels tab claims.
-        val reelsTab = snap.reelsTabSelected && !snap.feedTabSelected && !storyOpen
+        val reelsTab = reelsSel && !feedSel
 
         if (tabBarVisible) dmContext = false
         if (chatOpen) dmContext = true
@@ -131,21 +136,20 @@ class ReelsBlockerService : AccessibilityService() {
                 if (dmContext && !tabBarVisible) {
                     inAllowedReel = true
                     reelStartedAt = now
-                    reelAuthor = snap.author
+                    reelAuthor = author
                 } else {
                     message = MSG_REELS
                     stickyMessage = message
                 }
             } else if (now - reelStartedAt > 1200) {
-                val authorChanged =
-                    reelAuthor != null && snap.author != null && snap.author != reelAuthor
+                val authorChanged = reelAuthor != null && author != null && author != reelAuthor
                 val pagerScrolled = isScroll && isReelPager(event)
                 if (authorChanged || pagerScrolled) {
                     message = MSG_ONE_REEL
                     stickyMessage = message
                     inAllowedReel = false
-                } else if (reelAuthor == null && snap.author != null) {
-                    reelAuthor = snap.author
+                } else if (reelAuthor == null && author != null) {
+                    reelAuthor = author
                 }
             }
         } else {
@@ -156,17 +160,29 @@ class ReelsBlockerService : AccessibilityService() {
 
         if (message != null) {
             clearRegions()
-            val clips = ids.filter { it.startsWith("clips") }.take(4).joinToString(",")
-            val debug = "reelsTab=${snap.reelsTabSelected} feedTab=${snap.feedTabSelected} " +
-                "fs=$fullScreenViewer story=$storyOpen bar=$tabBarVisible dm=$dmContext " +
-                "pagerH=$pagerH/$screenH ids=[$clips]"
+            hideBadge()
+            val debug = "reelsSel=$reelsSel feedSel=$feedSel fs=$fullScreenViewer " +
+                "bar=$tabBarVisible dm=$dmContext pagerH=$pagerH/$screenH"
             showOverlay(message, debug)
         } else {
             hideOverlay()
-            if (snap.feedTabSelected && tabBarVisible && !storyOpen) {
-                setRegions(snap)
+            if (feedSel && tabBarVisible) {
+                updateRegions(pagers, medias, descs, now)
             } else {
                 clearRegions()
+            }
+            if (tabBarVisible) {
+                if (now - lastDebugAt > 1500) {
+                    lastDebugAt = now
+                    debugIds = collectDebug(root)
+                }
+                val ms = System.currentTimeMillis() - now
+                showBadge(
+                    "feed=$feedSel reels=$reelsSel P=${pagers.size} M=${medias.size} " +
+                        "D=${descs.size} R=${regions.size} ${ms}ms\n$debugIds"
+                )
+            } else {
+                hideBadge()
             }
         }
     }
@@ -177,33 +193,11 @@ class ReelsBlockerService : AccessibilityService() {
         return cls.contains("ViewPager") || id.contains("clips")
     }
 
+    private fun byId(root: AccessibilityNodeInfo, id: String): List<AccessibilityNodeInfo> =
+        root.findAccessibilityNodeInfosByViewId("$IG_PACKAGE:id/$id") ?: emptyList()
+
     private fun boundsOf(node: AccessibilityNodeInfo): Rect =
         Rect().also { node.getBoundsInScreen(it) }
-
-    private fun scan(node: AccessibilityNodeInfo?, snap: Snapshot, depth: Int) {
-        if (node == null || depth > 40) return
-
-        val fullId = node.viewIdResourceName
-        if (fullId != null) {
-            val id = fullId.substringAfter(":id/")
-            snap.ids.add(id)
-            when (id) {
-                "clips_tab" -> if (node.isSelected) snap.reelsTabSelected = true
-                "feed_tab" -> if (node.isSelected) snap.feedTabSelected = true
-                "clips_author_username" -> snap.author = node.text?.toString()
-                "clips_viewer_view_pager" -> snap.pagers.add(Pair(node, boundsOf(node)))
-                "clips_media_component" -> snap.medias.add(Pair(node, boundsOf(node)))
-            }
-        }
-        val desc = node.contentDescription?.toString()
-        if (desc != null && desc.startsWith("Reel by")) {
-            snap.reelDescs.add(Pair(node, boundsOf(node)))
-        }
-
-        for (i in 0 until node.childCount) {
-            scan(node.getChild(i), snap, depth + 1)
-        }
-    }
 
     private fun resetState() {
         inAllowedReel = false
@@ -213,10 +207,15 @@ class ReelsBlockerService : AccessibilityService() {
 
     // ---- Single-reel overlays (home feed) -------------------------------------------------
 
-    private fun setRegions(snap: Snapshot) {
-        val primary = if (snap.pagers.isNotEmpty()) snap.pagers else snap.medias
+    private fun updateRegions(
+        pagers: List<Pair<AccessibilityNodeInfo, Rect>>,
+        medias: List<Pair<AccessibilityNodeInfo, Rect>>,
+        descs: List<Pair<AccessibilityNodeInfo, Rect>>,
+        now: Long
+    ) {
+        val primary = if (pagers.isNotEmpty()) pagers else medias
         val candidates = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
-        for (p in primary + snap.reelDescs) {
+        for (p in primary + descs) {
             val r = p.second
             if (r.height() >= dp(120) && r.width() >= dp(120)) candidates.add(p)
         }
@@ -225,20 +224,31 @@ class ReelsBlockerService : AccessibilityService() {
         for (c in candidates) {
             if (kept.none { it.second.contains(c.second) }) kept.add(c)
         }
-        regionNodes = kept.map { it.first }
-        applyRegions(kept.mapNotNull { clamp(it.second) })
+
+        if (kept.isNotEmpty()) {
+            regions.clear()
+            for (k in kept) regions.add(Region(k.first, k.second, now))
+            applyRegions()
+        } else {
+            // Nothing found this time: keep what we had for a moment instead of flickering.
+            trackRegions(now)
+        }
     }
 
-    private fun trackRegions() {
-        val alive = regionNodes.filter {
-            try {
-                it.refresh()
+    private fun trackRegions(now: Long) {
+        for (r in regions) {
+            val alive = try {
+                r.node.refresh()
             } catch (e: Exception) {
                 false
             }
+            if (alive) {
+                r.rect = boundsOf(r.node)
+                r.seenAt = now
+            }
         }
-        regionNodes = alive
-        applyRegions(alive.mapNotNull { clamp(boundsOf(it)) })
+        regions.removeAll { now - it.seenAt > REGION_GRACE_MS }
+        applyRegions()
     }
 
     private fun clamp(src: Rect): Rect? {
@@ -265,7 +275,11 @@ class ReelsBlockerService : AccessibilityService() {
         }
     }
 
-    private fun applyRegions(rects: List<Rect>) {
+    private fun applyRegions() {
+        val rects = regions.mapNotNull { clamp(it.rect) }
+        if (rects == lastApplied) return
+        lastApplied = rects
+
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         while (regionViews.size > rects.size) {
             val v = regionViews.removeAt(regionViews.size - 1)
@@ -296,8 +310,8 @@ class ReelsBlockerService : AccessibilityService() {
     }
 
     private fun clearRegions() {
-        regionNodes = emptyList()
-        if (regionViews.isNotEmpty()) applyRegions(emptyList())
+        regions.clear()
+        if (regionViews.isNotEmpty() || lastApplied.isNotEmpty()) applyRegions()
     }
 
     private fun buildRegion(): View {
@@ -313,6 +327,76 @@ class ReelsBlockerService : AccessibilityService() {
         label.gravity = Gravity.CENTER
         container.addView(label)
         return container
+    }
+
+    // ---- Temporary technical strip --------------------------------------------------------
+
+    private fun showBadge(text: String) {
+        val existing = badge
+        if (existing != null) {
+            existing.text = text
+            return
+        }
+        val tv = TextView(this)
+        tv.setBackgroundColor(Color.parseColor("#B3000000"))
+        tv.setTextColor(Color.parseColor("#9AE6B4"))
+        tv.textSize = 9f
+        tv.setPadding(dp(6), dp(2), dp(6), dp(2))
+        tv.text = text
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.TOP or Gravity.START
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(tv, params)
+            badge = tv
+        } catch (e: Exception) {
+            badge = null
+        }
+    }
+
+    private fun hideBadge() {
+        val tv = badge ?: return
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(tv)
+        } catch (e: Exception) {
+            // already gone
+        }
+        badge = null
+    }
+
+    private fun collectDebug(root: AccessibilityNodeInfo): String {
+        val ids = LinkedHashSet<String>()
+        val descs = ArrayList<String>()
+        walkDebug(root, 0, ids, descs)
+        return "ids=" + ids.take(10).joinToString(",") + "\nd=" + descs.joinToString(" | ")
+    }
+
+    private fun walkDebug(
+        n: AccessibilityNodeInfo?,
+        depth: Int,
+        ids: MutableSet<String>,
+        descs: MutableList<String>
+    ) {
+        if (n == null || depth > 40) return
+        val id = n.viewIdResourceName?.substringAfter(":id/")
+        if (id != null && (id.contains("clips") || id.contains("reel") || id.contains("video"))) {
+            ids.add(id)
+        }
+        val desc = n.contentDescription?.toString()
+        if (desc != null && descs.size < 3 && (desc.startsWith("Reel") || desc.startsWith("Video"))) {
+            descs.add(desc.take(28))
+        }
+        for (i in 0 until n.childCount) {
+            walkDebug(n.getChild(i), depth + 1, ids, descs)
+        }
     }
 
     // ---- Full-screen overlay --------------------------------------------------------------
@@ -453,20 +537,23 @@ class ReelsBlockerService : AccessibilityService() {
         focusRequest = null
     }
 
-    override fun onInterrupt() {
+    private fun removeEverything() {
         hideOverlay()
         clearRegions()
+        hideBadge()
+    }
+
+    override fun onInterrupt() {
+        removeEverything()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        hideOverlay()
-        clearRegions()
+        removeEverything()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        hideOverlay()
-        clearRegions()
+        removeEverything()
         super.onDestroy()
     }
 }
