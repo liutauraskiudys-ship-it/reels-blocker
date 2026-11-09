@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- ring -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,54m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.5" />
+
+    <!-- play triangle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47,42L47,66L67,54Z" />
+
+    <!-- slash: dark cut-out first, then the white line -->
+    <path
+        android:pathData="M35,73L73,35"
+        android:strokeColor="#0E0E0E"
+        android:strokeLineCap="round"
+        android:strokeWidth="10" />
+    <path
+        android:pathData="M35,73L73,35"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.5" />
+</vector>

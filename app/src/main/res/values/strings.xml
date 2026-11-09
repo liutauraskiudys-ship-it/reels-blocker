@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Reels Blocker</string>
-    <string name="service_description">Watches only the Instagram app. Sends you back when you open the Reels tab, Explore reels, or swipe to another reel. Reels opened from a chat are allowed, one at a time. Nothing is stored or sent anywhere.</string>
+    <string name="service_description">Covers the Instagram Reels tab and Explore reels with a Reels blocked screen. Reels opened from a chat are allowed, one at a time. It ignores every other app, stores nothing and has no internet access.</string>
 </resources>

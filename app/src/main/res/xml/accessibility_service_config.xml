@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  No packageNames filter on purpose: the service has to notice when you leave Instagram so the
+  "Reels blocked" screen never stays on top of other apps. Events from every app other than
+  Instagram are dropped immediately, and the app has no internet permission.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewScrolled"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/service_description"
-    android:notificationTimeout="100"
-    android:packageNames="com.instagram.android" />
+    android:notificationTimeout="100" />
