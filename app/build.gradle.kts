@@ -11,8 +11,8 @@ android {
         applicationId = "com.liutauras.reelsblocker"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // Fixed signing key so every new build installs over the previous one.

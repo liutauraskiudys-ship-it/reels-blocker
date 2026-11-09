@@ -81,16 +81,23 @@ class ReelsBlockerService : AccessibilityService() {
         val tabBarVisible = feedTabs.isNotEmpty() || clipsTabs.isNotEmpty()
         val chatOpen = byId(root, "row_thread_composer_edittext").isNotEmpty()
         val author = byId(root, "clips_author_username").firstOrNull()?.text?.toString()
-        val pagerBounds = byId(root, "clips_viewer_view_pager").map { boundsOf(it) }
+        // Only pagers that are really on screen count: Instagram keeps the Reels page alive,
+        // hidden, behind the other tabs.
+        val pagerBounds = byId(root, "clips_viewer_view_pager")
+            .filter { it.isVisibleToUser }.map { boundsOf(it) }
+        val otherTabSelected = listOf("search_tab", "profile_tab", "direct_tab", "creation_tab")
+            .any { id -> byId(root, id).any { it.isSelected } }
 
         val screenH = resources.displayMetrics.heightPixels
         val fullH = (screenH * 85) / 100
         val topMax = screenH / 20
 
         // Full-screen reel viewer: a pager that fills the screen, not one that sits in the feed.
-        var fullScreenViewer = !feedSel && pagerBounds.any { it.height() >= fullH && it.top <= topMax }
+        var fullScreenViewer = !feedSel && !otherTabSelected && pagerBounds.any { it.height() >= fullH && it.top <= topMax }
         // If the Home tab is selected we are on the home feed, whatever the Reels tab claims.
-        var reelsTab = reelsSel && !feedSel
+        // The Reels tab keeps its "selected" flag after you leave it, so it only counts when no
+        // other tab is selected and the reel pager is actually visible.
+        var reelsTab = reelsSel && !feedSel && !otherTabSelected && pagerBounds.isNotEmpty()
 
         // Stories (Instagram calls them "reel" internally) must never be blocked. Checked only
         // when we are about to block something, and at most every 400 ms.
