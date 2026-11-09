@@ -61,6 +61,15 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(40))
         }
 
+        val tip = TextView(this).apply {
+            text = "Tip: on Instagram's home screen, tap \"Instagram\" at the top and choose " +
+                "Following to hide suggested posts and reels from your feed."
+            setTextColor(muted)
+            textSize = 13f
+            setLineSpacing(0f, 1.3f)
+            setPadding(0, dp(32), 0, 0)
+        }
+
         val button = Button(this).apply {
             text = "Open accessibility settings"
             isAllCaps = false
@@ -88,6 +97,7 @@ class MainActivity : Activity() {
         root.addView(button, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, dp(52)
         ))
+        root.addView(tip)
         setContentView(root)
     }
 
