@@ -47,6 +47,7 @@ class ReelsBlockerService : AccessibilityService() {
     private var suppressUntil = 0L
 
     private var overlay: View? = null
+    private var debugView: TextView? = null
     private var focusRequest: AudioFocusRequest? = null
 
     private class Snapshot {
@@ -92,7 +93,11 @@ class ReelsBlockerService : AccessibilityService() {
 
         var message: String? = null
 
-        if (snap.reelsTabSelected) {
+        // If the Home tab is selected we are on the home feed, whatever the Reels tab claims
+        // (Instagram can leave the Reels tab flagged as selected after you leave it).
+        val reelsTab = snap.reelsTabSelected && !snap.feedTabSelected
+
+        if (reelsTab) {
             message = MSG_REELS
         } else if (reelViewerOpen && !snap.feedTabSelected) {
             val sticky = stickyMessage
@@ -125,7 +130,14 @@ class ReelsBlockerService : AccessibilityService() {
             stickyMessage = null
         }
 
-        if (message != null) showOverlay(message) else hideOverlay()
+        if (message != null) {
+            val clips = ids.filter { it.startsWith("clips") }.take(6).joinToString(",")
+            val debug = "reelsTab=${snap.reelsTabSelected} feedTab=${snap.feedTabSelected} " +
+                "viewer=$reelViewerOpen bar=$tabBarVisible dm=$dmContext ids=[$clips]"
+            showOverlay(message, debug)
+        } else {
+            hideOverlay()
+        }
     }
 
     private fun isReelPager(event: AccessibilityEvent): Boolean {
@@ -165,9 +177,12 @@ class ReelsBlockerService : AccessibilityService() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun showOverlay(message: String) {
-        if (overlay != null) return
-        val view = buildOverlay(message)
+    private fun showOverlay(message: String, debug: String) {
+        if (overlay != null) {
+            debugView?.text = debug
+            return
+        }
+        val view = buildOverlay(message, debug)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -193,10 +208,11 @@ class ReelsBlockerService : AccessibilityService() {
             // already gone
         }
         overlay = null
+        debugView = null
         releaseAudio()
     }
 
-    private fun buildOverlay(message: String): View {
+    private fun buildOverlay(message: String, debug: String): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -240,6 +256,16 @@ class ReelsBlockerService : AccessibilityService() {
         root.addView(button, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, dp(52)
         ))
+        // Temporary technical line, helps find why a screen was treated as Reels.
+        val debugText = TextView(this).apply {
+            text = debug
+            setTextColor(Color.parseColor("#555555"))
+            textSize = 10f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(48), 0, 0)
+        }
+        debugView = debugText
+        root.addView(debugText)
         return root
     }
 
