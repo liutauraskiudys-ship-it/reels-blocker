@@ -212,7 +212,9 @@ class ReelsBlockerService : AccessibilityService() {
                 val ms = System.currentTimeMillis() - now
                 showBadge(
                     "feed=$feedSel reels=$reelsSel P=${pagers.size} M=${medias.size} " +
-                        "V=${videos.size} D=${descs.size} R=${regions.size} ${ms}ms\n$debugIds"
+                        "V=${videos.size} D=${descs.size} R=${regions.size} ${ms}ms\n" +
+                        "P:${fmt(pagers)} M:${fmt(medias)} V:${fmt(videos)} D:${fmt(descs)} " +
+                        "H=${resources.displayMetrics.heightPixels}\n$debugIds"
                 )
             } else {
                 hideBadge()
@@ -236,6 +238,9 @@ class ReelsBlockerService : AccessibilityService() {
         return false
     }
 
+    private fun fmt(list: List<Pair<AccessibilityNodeInfo, Rect>>): String =
+        "[" + list.take(2).joinToString(",") { "${it.second.top}-${it.second.bottom}" } + "]"
+
     private fun byId(root: AccessibilityNodeInfo, id: String): List<AccessibilityNodeInfo> =
         root.findAccessibilityNodeInfosByViewId("$IG_PACKAGE:id/$id") ?: emptyList()
 
@@ -258,15 +263,16 @@ class ReelsBlockerService : AccessibilityService() {
         now: Long
     ) {
         // A reel that is playing in the feed shows up under different ids than one that is only
-        // peeking in, so look at all of them. Prefer the tightest source that exists.
-        val primary = when {
-            videos.isNotEmpty() -> videos
-            medias.isNotEmpty() -> medias
-            else -> pagers
-        }
-        val maxH = (resources.displayMetrics.heightPixels * 92) / 100
+        // peeking in, so use every kind of element. When several belong to the same reel, the
+        // biggest one wins (see the de-duplication below).
+        val maxH = (resources.displayMetrics.heightPixels * 98) / 100
+        val all = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
+        all.addAll(pagers)
+        all.addAll(medias)
+        all.addAll(videos)
+        all.addAll(descs)
         val candidates = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
-        for (p in primary + descs) {
+        for (p in all) {
             val r = p.second
             if (r.height() >= dp(40) && r.height() < maxH && r.width() >= dp(120)) candidates.add(p)
         }
